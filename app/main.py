@@ -9,7 +9,7 @@ import uuid
 import asyncio
 import httpx
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
@@ -137,28 +137,42 @@ app.add_middleware(
 
 def get_api_key(authorization: Optional[str] = Header(None)) -> str:
     """从请求头获取 API Key，或使用环境变量"""
-    if authorization and authorization.startswith("Bearer "):
-       
-        token = authorization[7:]
-        print('token',token)
-        # 如果传入的是有效的 Replicate token，使用它
-        if token.startswith("r8_") or token.startswith("replicate_"):
-            return token
     
-    # 否则使用环境变量
-    api_key = os.getenv("REPLICATE_API_TOKEN") or os.getenv("REPLICATE_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "message": "No API key provided. Set REPLICATE_API_TOKEN or pass Bearer token.",
-                    "type": "invalid_request_error",
-                    "code": "invalid_api_key"
-                }
+    # 调试日志
+    logger.info(f"Authorization header: {authorization[:30] if authorization else 'None'}...")
+    
+    # 优先使用环境变量中的 Replicate Token
+    env_api_key = os.getenv("REPLICATE_API_TOKEN") or os.getenv("REPLICATE_API_KEY")
+    
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+        logger.info(f"Token prefix: {token[:10] if token else 'None'}...")
+        
+        # 如果传入的是有效的 Replicate token (r8_ 开头)，直接使用
+        if token.startswith("r8_"):
+            logger.info("Using r8_ token from header")
+            return token
+        # 否则（比如 sk-xxx 格式），使用环境变量中的 Replicate token
+        elif env_api_key:
+            logger.info("Using env token (header token is not r8_ format)")
+            return env_api_key
+    
+    # 最后使用环境变量
+    if env_api_key:
+        logger.info("Using env token (no valid header)")
+        return env_api_key
+        
+    logger.error("No API key found!")
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "error": {
+                "message": "No Replicate API key provided. Set REPLICATE_API_TOKEN environment variable.",
+                "type": "invalid_request_error",
+                "code": "invalid_api_key"
             }
-        )
-    return api_key
+        }
+    )
 
 
 def get_replicate_model(model_name: str) -> str:
@@ -272,42 +286,93 @@ async def run_replicate_model(
     model_id: str,
     input_params: Dict[str, Any]
 ) -> List[str]:
-    """异步运行 Replicate 模型"""
+    """使用 HTTP API 直接调用 Replicate 模型"""
     
-    # 设置 API token
-    os.environ["REPLICATE_API_TOKEN"] = api_key
+    # 构建 API URL
+    # model_id 格式: "bytedance/seedream-4.5"
+    api_url = f"https://api.replicate.com/v1/models/{model_id}/predictions"
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Prefer": "wait"  # 同步等待结果
+    }
+    
+    payload = {
+        "input": input_params
+    }
+    
+    logger.info(f"Calling Replicate API: {api_url}")
+    logger.info(f"Payload: {payload}")
     
     try:
-        # 使用 replicate 库运行模型
-        output = await asyncio.to_thread(
-            replicate.run,
-            model_id,
-            input=input_params
+        async with httpx.AsyncClient(timeout=300) as client:  # 5分钟超时
+            response = await client.post(api_url, headers=headers, json=payload)
+            
+            logger.info(f"Replicate response status: {response.status_code}")
+            
+            if response.status_code != 200 and response.status_code != 201:
+                error_text = response.text
+                logger.error(f"Replicate API error: {error_text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail={
+                        "error": {
+                            "message": f"Replicate API error: {error_text}",
+                            "type": "replicate_error",
+                            "code": "api_error"
+                        }
+                    }
+                )
+            
+            result = response.json()
+            logger.info(f"Replicate result status: {result.get('status')}")
+            
+            # 检查是否成功
+            if result.get("status") == "failed":
+                error_msg = result.get("error", "Unknown error")
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "error": {
+                            "message": f"Image generation failed: {error_msg}",
+                            "type": "replicate_error",
+                            "code": "generation_failed"
+                        }
+                    }
+                )
+            
+            # 提取输出 URL
+            output = result.get("output", [])
+            if isinstance(output, list):
+                return output
+            elif isinstance(output, str):
+                return [output]
+            else:
+                return []
+                
+    except httpx.TimeoutException:
+        logger.error("Replicate API timeout")
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "error": {
+                    "message": "Image generation timed out",
+                    "type": "timeout_error",
+                    "code": "timeout"
+                }
+            }
         )
-        
-        # 处理输出
-        urls = []
-        if isinstance(output, list):
-            for item in output:
-                if hasattr(item, 'url'):
-                    urls.append(item.url())
-                elif isinstance(item, str):
-                    urls.append(item)
-        elif hasattr(output, 'url'):
-            urls.append(output.url())
-        elif isinstance(output, str):
-            urls.append(output)
-        
-        return urls
-        
-    except ReplicateError as e:
-        logger.error(f"Replicate error: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
         raise HTTPException(
             status_code=500,
             detail={
                 "error": {
-                    "message": str(e),
-                    "type": "replicate_error",
+                    "message": f"Image generation failed: {str(e)}",
+                    "type": "server_error",
                     "code": "model_error"
                 }
             }
@@ -377,7 +442,9 @@ async def create_image(
 ):
     """生成图像 - OpenAI 兼容接口"""
     
-    logger.info(f"Image generation request: model={request.model}, prompt={request.prompt[:50]}...")
+    logger.info(f"Image generation request: model={request.model}")
+    logger.info(f"Full prompt: [{request.prompt}]")
+    logger.info(f"Size: {request.size}, Quality: {request.quality}")
     
     # 获取 Replicate 模型
     replicate_model = get_replicate_model(request.model)
@@ -467,24 +534,134 @@ async def health_check():
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions():
-    """兼容 New API 测试 - 返回一个简单响应"""
+async def chat_completions(
+    request: Dict[str, Any] = Body(default={}),
+    api_key: str = Depends(get_api_key)
+):
+    """
+    兼容聊天格式的图像生成
+    支持通过 /v1/chat/completions 来生成图片
+    """
+    import json as json_lib
+    
+    if request is None:
+        request = {}
+    
+    # 提取参数
+    model = request.get("model", "dall-e-3")
+    messages = request.get("messages", [])
+    
+    # 从 messages 中提取 prompt
+    prompt = ""
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                prompt = content
+            elif isinstance(content, list):
+                # 处理多模态格式
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        prompt = item.get("text", "")
+                        break
+    
+    if not prompt:
+        return {
+            "id": "chatcmpl-proxy",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "请提供图像描述"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+    
+    # 解析尺寸参数
+    resolution = request.get("resolution", "2K")
+    ratio = request.get("ratio", "1:1")
+    size = request.get("size", "1024x1024")
+    quality = "hd" if resolution.lower() == "4k" else "standard"
+    
+    # 映射 ratio 到 size
+    ratio_to_size = {
+        "1:1": "1024x1024",
+        "3:4": "1024x1792",
+        "4:3": "1792x1024",
+        "9:16": "1024x1792",
+        "16:9": "1792x1024",
+    }
+    if ratio in ratio_to_size:
+        size = ratio_to_size[ratio]
+    
+    logger.info(f"Chat image generation: model={model}, prompt={prompt[:50]}...")
+    
+    # 获取 Replicate 模型
+    replicate_model = get_replicate_model(model)
+    
+    # 构建输入参数
+    input_params = build_replicate_input(
+        model_id=replicate_model,
+        prompt=prompt,
+        size=size,
+        quality=quality,
+        style=None,
+        n=1
+    )
+    
+    # 运行模型
+    try:
+        image_urls = await run_replicate_model(api_key, replicate_model, input_params)
+    except HTTPException as e:
+        return {
+            "id": "chatcmpl-proxy",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": f"生成失败: {str(e.detail)}"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+    
+    if not image_urls:
+        return {
+            "id": "chatcmpl-proxy",
+            "object": "chat.completion", 
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "图像生成失败，请重试"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+    
+    # 返回图片 URL
+    image_url = image_urls[0]
+    
+    # 构造 markdown 格式的图片响应
+    content = f"![Generated Image]({image_url})\n\n[点击查看大图]({image_url})"
+    
     return {
-        "id": "chatcmpl-proxy",
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": "replicate-proxy",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "This is an image generation proxy. Use /v1/images/generations endpoint."
-                },
-                "finish_reason": "stop"
-            }
-        ],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": len(prompt), "completion_tokens": 20, "total_tokens": len(prompt) + 20}
     }
 
 
