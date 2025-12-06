@@ -138,7 +138,9 @@ app.add_middleware(
 def get_api_key(authorization: Optional[str] = Header(None)) -> str:
     """从请求头获取 API Key，或使用环境变量"""
     if authorization and authorization.startswith("Bearer "):
+       
         token = authorization[7:]
+        print('token',token)
         # 如果传入的是有效的 Replicate token，使用它
         if token.startswith("r8_") or token.startswith("replicate_"):
             return token
