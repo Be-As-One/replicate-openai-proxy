@@ -22,22 +22,35 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 模型映射配置
+# OpenAI 格式模型名 -> Replicate 模型标识 (owner/model-name)
 MODEL_MAPPING = {
-    # OpenAI 格式模型名 -> Replicate 模型标识
+    # Seedream 4.5 (默认)
     "dall-e-3": "bytedance/seedream-4.5",
-    "dall-e-2": "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
     "seedream-4.5": "bytedance/seedream-4.5",
     "seedream": "bytedance/seedream-4.5",
+    
+    # Flux 系列
     "flux-dev": "black-forest-labs/flux-dev",
     "flux-schnell": "black-forest-labs/flux-schnell",
     "flux-pro": "black-forest-labs/flux-pro",
     "flux-1.1-pro": "black-forest-labs/flux-1.1-pro",
-    "sdxl": "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+    
+    # SDXL
+    "dall-e-2": "stability-ai/sdxl",
+    "sdxl": "stability-ai/sdxl",
+    
+    # Stable Diffusion 3
     "sd-3": "stability-ai/stable-diffusion-3",
     "stable-diffusion-3": "stability-ai/stable-diffusion-3",
+    
+    # Ideogram
     "ideogram": "ideogram-ai/ideogram-v2",
     "ideogram-v2": "ideogram-ai/ideogram-v2",
+    
+    # Recraft
     "recraft-v3": "recraft-ai/recraft-v3",
+    
+    # Playground
     "playground-v2.5": "playgroundai/playground-v2.5-1024px-aesthetic",
 }
 
@@ -320,6 +333,16 @@ async def root():
     }
 
 
+@app.post("/")
+async def root_post():
+    """兼容某些客户端的健康检查"""
+    return {
+        "message": "Replicate to OpenAI Compatible API Proxy",
+        "version": "1.0.0",
+        "status": "ok"
+    }
+
+
 @app.get("/v1/models", response_model=ModelsResponse)
 async def list_models():
     """列出可用模型"""
@@ -441,6 +464,28 @@ async def health_check():
     return {"status": "healthy", "timestamp": int(time.time())}
 
 
+@app.post("/v1/chat/completions")
+async def chat_completions():
+    """兼容 New API 测试 - 返回一个简单响应"""
+    return {
+        "id": "chatcmpl-proxy",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": "replicate-proxy",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "This is an image generation proxy. Use /v1/images/generations endpoint."
+                },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
