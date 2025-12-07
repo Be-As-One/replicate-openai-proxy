@@ -52,6 +52,10 @@ MODEL_MAPPING = {
     
     # Playground
     "playground-v2.5": "playgroundai/playground-v2.5-1024px-aesthetic",
+
+    # Nano Banana Pro
+    "nanobananapro": "google/nano-banana-pro",
+    "nano-banana-pro": "google/nano-banana-pro",
 }
 
 # 尺寸映射
@@ -272,7 +276,18 @@ def build_replicate_input(
             "size": f"{width}x{height}",
         }
         return input_params
-    
+
+    # Nano Banana Pro
+    if "nano-banana" in model_id.lower():
+        input_params = {
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "output_format": "png",
+        }
+        if n > 1:
+            input_params["num_outputs"] = min(n, 4)
+        return input_params
+
     # 默认参数
     return {
         "prompt": prompt,
