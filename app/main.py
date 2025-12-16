@@ -53,9 +53,11 @@ MODEL_MAPPING = {
     # Playground
     "playground-v2.5": "playgroundai/playground-v2.5-1024px-aesthetic",
 
-    # Nano Banana Pro
-    "nanobananapro": "google/nano-banana-pro",
-    "nano-banana-pro": "google/nano-banana-pro",
+    # Nano Banana (Google Gemini 2.5 Flash Image)
+    "nanobanana": "google/nano-banana",
+    "nano-banana": "google/nano-banana",
+    "nanobananapro": "google/nano-banana",
+    "nano-banana-pro": "google/nano-banana",
 }
 
 # 尺寸映射
