@@ -203,7 +203,8 @@ def build_replicate_input(
     size: str,
     quality: str,
     style: Optional[str],
-    n: int
+    n: int,
+    image_inputs: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """根据不同模型构建 Replicate 输入参数"""
     
@@ -279,13 +280,21 @@ def build_replicate_input(
         }
         return input_params
 
-    # Nano Banana Pro
+    # Nano Banana (支持图片输入)
     if "nano-banana" in model_id.lower():
         input_params = {
             "prompt": prompt,
-            "aspect_ratio": aspect_ratio,
             "output_format": "png",
         }
+        # 如果有输入图片，添加到参数中
+        if image_inputs and len(image_inputs) > 0:
+            input_params["image_input"] = image_inputs
+            # 有输入图片时，默认匹配输入图片的宽高比
+            input_params["aspect_ratio"] = "match_input_image"
+        else:
+            # 无输入图片时，使用指定的宽高比
+            input_params["aspect_ratio"] = aspect_ratio
+
         if n > 1:
             input_params["num_outputs"] = min(n, 4)
         return input_params
@@ -568,8 +577,9 @@ async def chat_completions(
     model = request.get("model", "dall-e-3")
     messages = request.get("messages", [])
     
-    # 从 messages 中提取 prompt
+    # 从 messages 中提取 prompt 和图片
     prompt = ""
+    image_inputs = []
     for msg in messages:
         if msg.get("role") == "user":
             content = msg.get("content", "")
@@ -578,9 +588,18 @@ async def chat_completions(
             elif isinstance(content, list):
                 # 处理多模态格式
                 for item in content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        prompt = item.get("text", "")
-                        break
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            prompt = item.get("text", "")
+                        elif item.get("type") == "image_url":
+                            # 提取图片 URL
+                            image_url_obj = item.get("image_url", {})
+                            if isinstance(image_url_obj, dict):
+                                url = image_url_obj.get("url", "")
+                                if url:
+                                    image_inputs.append(url)
+                            elif isinstance(image_url_obj, str):
+                                image_inputs.append(image_url_obj)
     
     if not prompt:
         return {
@@ -617,7 +636,11 @@ async def chat_completions(
     
     # 获取 Replicate 模型
     replicate_model = get_replicate_model(model)
-    
+
+    # 记录图片输入信息
+    if image_inputs:
+        logger.info(f"Image inputs: {len(image_inputs)} images - {image_inputs}")
+
     # 构建输入参数
     input_params = build_replicate_input(
         model_id=replicate_model,
@@ -625,7 +648,8 @@ async def chat_completions(
         size=size,
         quality=quality,
         style=None,
-        n=1
+        n=1,
+        image_inputs=image_inputs if image_inputs else None
     )
     
     # 运行模型
